@@ -544,37 +544,48 @@ genes=[('Or5t5_sangue','Or5t5 Blood'),('Or5t5_rim','Or5t5 Kidney'),('Or5t5_place
 endpoints={}
 for field,label in endpoint_specs:
     endpoints[field]=run_oneway_pipeline(data,field)
-def significance(ax,post,blocks):
+def significance(ax,post,blocks,*,p_label_gap=0,group_colors=None):
     sig=post.loc[post.significant]
     if sig.empty:return
     log=ax.get_yscale()=='log';top=max(float(np.max(x)) for x in blocks if len(x));bottom=min(float(np.min(x)) for x in blocks if len(x))
-    step=(top-bottom)*.13 or 1
+    # Leave room between stacked brackets for the offset p-value labels.
+    step=(top-bottom)*(.17 if p_label_gap else .13) or 1
     for j,(_,row) in enumerate(sig.iterrows()):
         a,b=groups.index(row.group1),groups.index(row.group2)
         y=top*(1.45**(j+1)) if log else top+step*(j+1)
-        ax.plot([a,a,b,b],[y,y*1.01 if log else y+step*.1,y*1.01 if log else y+step*.1,y],color='.25',lw=.7)
-        ax.text((a+b)/2,y,format_p_text(row.p_raw),ha='center',va='bottom',fontsize=7)
+        bracket_top=y*1.01 if log else y+step*.1
+        bracket_color = group_colors[a] if group_colors is not None else '.25'
+        ax.plot([a,a,b,b],[y,bracket_top,bracket_top,y],color=bracket_color,lw=.7)
+        label_y=bracket_top if p_label_gap else y
+        ax.annotate(format_p_text(row.p_raw),((a+b)/2,label_y),
+                    xytext=(0,p_label_gap),textcoords='offset points',
+                    ha='center',va='bottom',fontsize=7,annotation_clip=False)
     ax.set_ylim(top=y*(1.3 if log else 1.15))
-def boxes(ax,field,title,res):
+def boxes(ax,field,title,res,*,p_label_gap=0,group_colors=None):
     blocks=[data.loc[data.Group==g,field].dropna().to_numpy() for g in groups]
     if should_use_log_axis(np.concatenate([x for x in blocks if len(x)])) and all((x>0).all() for x in blocks):ax.set_yscale('log')
     ax.boxplot(blocks,positions=range(3),tick_labels=groups)
-    for j,x in enumerate(blocks):ax.scatter(j+np.random.default_rng(123).normal(0,.04,len(x)),x,s=9,color='.3',zorder=3)
-    ax.set_title(title,loc='left');ax.tick_params(axis='x',labelrotation=25);significance(ax,res['posthoc_df'],blocks)
+    for j,x in enumerate(blocks):
+        color = group_colors[j] if group_colors is not None else '.3'
+        ax.scatter(j+np.random.default_rng(123).normal(0,.04,len(x)),x,s=9,color=color,zorder=3)
+    ax.set_title(title,loc='left')
+    ax.tick_params(axis='x',labelrotation=0 if group_colors is not None else 25)
+    significance(ax,res['posthoc_df'],blocks,p_label_gap=p_label_gap,group_colors=group_colors)
 
 # %% Figure 1: physiological parameters
 def comparison_bracket(ax,left,right,top,depth,p_value):
     ax.plot([left,left,right,right],[top-depth,top,top,top-depth],color='.3',lw=.9)
-    ax.annotate(format_p_text(p_value),((left+right)/2,top),xytext=(0,2),
+    ax.annotate(format_p_text(p_value),((left+right)/2,top),xytext=(0,3.5),
                 textcoords='offset points',ha='center',va='bottom',fontsize=6)
 
-def endpoint_bars(ax,field,title):
+def endpoint_bars(ax,field,panel_letter,ylabel):
     blocks=[data.loc[data.Group==g,field].dropna() for g in groups]
     means=np.array([x.mean() for x in blocks])
     sem=np.array([stats.sem(x) for x in blocks])
     ax.bar(range(len(groups)),means,yerr=sem,color=['.2','.5','.8'],capsize=2)
     ax.set_xticks(range(len(groups)),groups)
-    ax.set_title(title,loc='left')
+    ax.set_title(panel_letter,loc='left',weight='bold')
+    ax.set_ylabel(ylabel+' (mean ± SEM)')
     peak=np.nanmax(means+np.nan_to_num(sem,nan=0))
     top=peak
     posthoc=endpoints[field]['posthoc_df']
@@ -602,19 +613,19 @@ for index,(outcome,ylabel) in enumerate([('Weight','Weight (g)'),('BloodPressure
         positions=[(sorted((groups.index(g1),groups.index(g2))),p) for g1,g2,p in pairs]
         positions.sort(key=lambda pair:(pair[0][1]-pair[0][0],-pair[0][0]))
         for level,((left,right),p) in enumerate(positions):
-            y=bar_tops[k]+peak*(.07+.12*level)
+            y=bar_tops[k]+peak*(.07+.18*level)
             a=k+(left-1)*width
             b=k+(right-1)*width
             comparison_bracket(ax,a,b,y,peak*.028,p)
             annotation_top=max(annotation_top,y)
-    upper_limit=annotation_top+.11*peak
+    upper_limit=annotation_top+.13*peak
     if index==0:
         ax.legend(loc='upper right',fontsize=7)
         upper_limit=max(upper_limit,peak/.70)
     ax.set_ylim(top=upper_limit)
     ax.set_xticks(range(len(days)),days);ax.set_ylabel(ylabel+' (mean ± SEM)');ax.set_title('ABC'[index],loc='left',weight='bold')
-endpoint_bars(fig.add_subplot(gs[2,0]),'pH','D  Urinary pH')
-endpoint_bars(fig.add_subplot(gs[2,1]),'Proteinuria_imageJ','E  Proteinuria')
+endpoint_bars(fig.add_subplot(gs[2,0]),'pH','D','Urinary pH')
+endpoint_bars(fig.add_subplot(gs[2,1]),'Proteinuria_imageJ','E','Proteinuria')
 savefig(fig,'Figure_1_Physiological_Parameters.png')
 
 # %% Figure 2 and thyroid statistics
@@ -623,9 +634,26 @@ ba=df_raw[['qTSH_ngml','pTSH_ngml']].dropna();mean=ba.mean(axis=1);difference=ba
 bias=difference.mean();sd=difference.std(ddof=1);r,p=stats.pearsonr(ba.iloc[:,0],ba.iloc[:,1])
 agreement=pd.DataFrame([dict(n=len(ba),Pearson_r=r,R_squared=r*r,p_raw=p,bias_measured_minus_predicted=bias,SD_difference=sd,LoA_lower=bias-1.96*sd,LoA_upper=bias+1.96*sd)])
 fig,axes=plt.subplots(2,2,figsize=(9.3,6.6),layout='constrained');ax=axes[0,0]
-ax.scatter(mean,difference,s=12);ax.axhline(bias);ax.axhline(bias+1.96*sd,ls='--');ax.axhline(bias-1.96*sd,ls='--')
-ax.set(title='A  Measured versus predicted TSH',xlabel='Mean TSH (ng/mL)',ylabel='Measured minus predicted (ng/mL)')
-for ax,field,title in zip(axes.flat[1:],['cTSH_ngmL','T4','T3'],['B  Imputed TSH (ng/mL)','C  Total T4 (µg/dL)','D  Total T3 (ng/dL)']):boxes(ax,field,title,hormones[field])
+thyroid_colors = ('tab:blue', 'tab:orange', 'tab:green')
+ax.scatter(mean, difference, s=12, color=thyroid_colors[0])
+ax.axhline(bias, color=thyroid_colors[0])
+ax.axhline(bias + 1.96 * sd, ls='--', color=thyroid_colors[0])
+ax.axhline(bias - 1.96 * sd, ls='--', color=thyroid_colors[0])
+ax.set(xlabel='Mean of TSH (ng/mL)', ylabel='Difference (First - Second) (ng/mL)')
+ax.set_title(r'$\mathbf{A}$ Bland–Altman - Quantified TSH vs Predict TSH', loc='left')
+ax.text(.02, .91,
+        f'Mean diff = {bias:.2f}\nLoA (+1.96 SD) = {bias + 1.96 * sd:.2f}\n'
+        f'LoA (−1.96 SD) = {bias - 1.96 * sd:.1f}',
+        transform=ax.transAxes, va='top', fontsize=8)
+thyroid_panels = [
+    ('B', 'cTSH_ngmL', 'Imputed TSH (ng/mL)', 'Imputed TSH (ng/mL)'),
+    ('C', 'T4', 'Total T4', 'Total T4 (µg/dL)'),
+    ('D', 'T3', 'Total T3', 'Total T3 (ng/dL)'),
+]
+for ax, (letter, field, title, ylabel) in zip(axes.flat[1:], thyroid_panels):
+    boxes(ax, field, rf'$\mathbf{{{letter}}}$ {title}', hormones[field],
+          p_label_gap=6, group_colors=thyroid_colors)
+    ax.set(xlabel='Status', ylabel=ylabel)
 with matplotlib.rc_context({'axes.unicode_minus': True}):
     savefig(fig,'Figure_2_Thyroid_Hormones_Agreement.png')
 def describe(field,label):
@@ -794,10 +822,9 @@ for lvl in status_levels:
 # %% Correlation figures and exports
 OUT_XLSX='Figure_4_Directed_Correlation_Statistics.xlsx'
 plot_blocks=[('All samples',r_all,p_all_bh,r_all_sig)]+[(g,r,p,rs) for g,r,p,rs,_ in group_mats]
-def correlation_plot(bubble,name):
-    fig,axes=plt.subplots(2,2,figsize=(11.7,8.3),layout='constrained')
-    fig.get_layout_engine().set(w_pad=.10,h_pad=.12)
-    fig.supxlabel('×  Correlation not estimable      Blank  Self-comparison omitted',fontsize=8)
+def correlation_plot(name):
+    fig,axes=plt.subplots(2,2,figsize=(12.6,8.3),layout='constrained')
+    fig.get_layout_engine().set(w_pad=.10,h_pad=.12,wspace=.16)
     cmap=plt.get_cmap('coolwarm');normcolor=matplotlib.colors.Normalize(-1,1)
     blocks=plot_blocks
     for index,(label,r,p,_) in enumerate(blocks):
@@ -809,19 +836,25 @@ def correlation_plot(bubble,name):
                         ax.text(j,i,'×',ha='center',va='center',fontsize=8,color='.25')
                     continue
                 sig=np.isfinite(b[i,j]) and b[i,j]<ALPHA
-                if bubble:ax.scatter(j,i,s=330*abs(a[i,j]),color=cmap(normcolor(a[i,j])),edgecolor='black' if sig else 'none',linewidth=.8,alpha=1 if sig else .15)
-                else:ax.add_patch(plt.Rectangle((j-.5,i-.5),1,1,color=cmap(normcolor(a[i,j]))))
-                if sig and bubble:
+                ax.scatter(j,i,s=330*abs(a[i,j]),color=cmap(normcolor(a[i,j])),
+                           edgecolor='black' if sig else 'none',linewidth=.8,
+                           alpha=1 if sig else .25)
+                if sig:
                     ax.annotate(f'{a[i,j]:.2f}',(j,i),xytext=(0,12),textcoords='offset points',
                                 ha='center',va='bottom',fontsize=7)
-                elif sig:
-                    ax.text(j,i,f'{a[i,j]:.2f}',ha='center',va='center',fontsize=7,color='white')
-        ax.set(xlim=(-.5,nc-.5),ylim=(nr-.5,-.5));ax.set_xticks(range(nc),[format_plot_label(x) for x in r.columns],rotation=90,fontsize=7);ax.set_yticks(range(nr),[format_plot_label(x) for x in r.index],fontsize=8);ax.set_title(chr(65+index)+'  '+label,loc='left')
+        ax.set(xlim=(-.5,nc-.5),ylim=(nr-.5,-.5));ax.set_xticks(range(nc),[format_plot_label(x) for x in r.columns],rotation=90,fontsize=7);ax.set_yticks(range(nr),[format_plot_label(x) for x in r.index],fontsize=8)
+        panel_letter = 'ABCD'[index]
+        ax.set_title(panel_letter, loc='left', fontweight='bold')
+        ax.set_title(label, loc='center')
+        ax.set_xticks(np.arange(nc - 1) + .5, minor=True)
+        ax.set_yticks(np.arange(nr - 1) + .5, minor=True)
+        ax.tick_params(which='minor', length=0)
+        ax.set_axisbelow(True)
+        ax.grid(which='minor', color='.88', linewidth=.6)
         ax.spines[['top','right']].set_visible(False)
     fig.colorbar(matplotlib.cm.ScalarMappable(norm=normcolor,cmap=cmap),ax=list(axes.flat),shrink=.6,label='Correlation r')
     savefig(fig,name)
-correlation_plot(False,'Supplement_Directed_Correlation_Cells.png')
-correlation_plot(True,'Figure_4_Directed_Correlation_Bubbles.png')
+correlation_plot('Figure_4_Directed_Correlation_Bubbles.png')
 with pd.ExcelWriter(OUT_XLSX,engine='openpyxl') as writer:
     for name,table in {'comparison_summary':comparison_summary,'correlations':corr_all_df}.items():export_values(table).to_excel(writer, sheet_name=name, index=False)
     matrices=[('all',r_all,p_all_raw,p_all_bh)]+[(g,r,raw,p) for g,r,p,_,raw in group_mats]
@@ -853,6 +886,96 @@ for name,table in list(supp_tables.items()):
     for c in table.select_dtypes(include=['object','string']):table[c]=table[c].map(english)
     supp_tables[name]=table.rename(columns=english)
 excel(OUT_SUPPLEMENT_XLSX,supp_tables)
+
+# %% ANN_Nonlinear_RegressionModel
+def measured_tsh_regression_results(df_raw):
+    def predict(train_x, train_y, test_x, log_response):
+        if len(train_y) < train_x.shape[1]:
+            return np.full(len(test_x), np.nan)
+        target = np.log(train_y) if log_response else train_y
+        coefficients, _, rank, _ = np.linalg.lstsq(train_x, target, rcond=None)
+        if rank < train_x.shape[1]:
+            return np.full(len(test_x), np.nan)
+        fitted = test_x @ coefficients
+        with np.errstate(over='ignore'):
+            return np.exp(fitted) if log_response else fitted
+
+    def metrics(observed, predicted):
+        if not len(observed) or not np.isfinite(predicted).all():
+            return np.nan, np.nan, np.nan, np.nan
+        error = observed - predicted
+        sse = error @ error
+        centered = observed - observed.mean()
+        sst = centered @ centered
+        return (1 - sse / sst if sst > 0 else np.nan, np.abs(error).mean(),
+                np.sqrt(sse / len(error)), np.abs(error).max())
+
+    def evaluate(name, features, log_response):
+        design = np.column_stack((np.ones(len(measured)), *features))
+        eligible = np.isfinite(measured) & np.isfinite(design).all(axis=1)
+        if log_response:
+            eligible &= measured > 0
+        x, y = design[eligible], measured[eligible]
+        fitted = predict(x, y, x, log_response)
+        held_out = np.empty(len(y))
+        for index in range(len(y)):
+            train = np.arange(len(y)) != index
+            held_out[index] = predict(x[train], y[train], x[index:index+1], log_response)[0]
+        return (name, design.shape[1], *metrics(y, fitted)[:3], *metrics(y, held_out))
+
+    measured, t4, t3 = df_raw[['qTSH_ngml', 'T4', 'T3']].apply(
+        pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).to_numpy(dtype=float).T
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_t4, log_t3 = np.log(t4), np.log(t3)
+        inv_t4, inv_t3 = 1 / t4, 1 / t3
+
+    # Compound, Growth and Exponential are equivalent under log-response least squares.
+    rows = []
+    for hormone, x, log_x, inv_x in [('T4', t4, log_t4, inv_t4), ('T3', t3, log_t3, inv_t3)]:
+        models = [
+            ('Linear', (x,), False),
+            ('Logarithmic', (log_x,), False),
+            ('Inverse', (inv_x,), False),
+            ('Quadratic', (x, x**2), False),
+            ('Cubic', (x, x**2, x**3), False),
+            ('Compound', (x,), True),
+            ('Power', (log_x,), True),
+            ('S', (inv_x,), True),
+            ('Growth', (x,), True),
+            ('Exponential', (x,), True),
+        ]
+        rows.extend(evaluate(f'{hormone} {name}', features, log_response)
+                    for name, features, log_response in models)
+
+    both_models = [
+        ('linear', (t4, t3), False),
+        ('log', (log_t4, log_t3), False),
+        ('inverse', (inv_t4, inv_t3), False),
+        ('power', (log_t4, log_t3), True),
+        ('exponential', (t4, t3), True),
+        ('S', (inv_t4, inv_t3), True),
+        ('linear+interaction', (t4, t3, t4*t3), False),
+        ('quadratic additive', (t4, t3, t4**2, t3**2), False),
+        ('quadratic full', (t4, t3, t4**2, t3**2, t4*t3), False),
+        ('log+interaction', (log_t4, log_t3, log_t4*log_t3), False),
+        ('reciprocal+interaction', (inv_t4, inv_t3, inv_t4*inv_t3), False),
+    ]
+    rows.extend(evaluate(f'Both {name}', features, log_response)
+                for name, features, log_response in both_models)
+    return pd.DataFrame(rows, columns=[
+        'Regression Models', 'Parametros', 'R2_ajuste_original', 'MAE_ajuste',
+        'RMSE_ajuste', 'R2_LOOCV', 'MAE_LOOCV', 'RMSE_LOOCV', 'Max_erro_LOOCV',
+    ])
+
+
+ann_destination = results_path / 'Supplementary_Study_Data_and_Analyses.xlsx'
+if not ann_destination.is_file():
+    raise FileNotFoundError('Run Export study data and supplementary analyses first.')
+ann_regression_results = measured_tsh_regression_results(df_raw)
+with pd.ExcelWriter(ann_destination, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+    export_values(ann_regression_results).to_excel(
+        writer, sheet_name='ANN_Nonlinear_RegressionModel', index=False)
+    finish_excel(writer)
 
 # %% Supplement: 5000 directed paired bootstrap resamples and 95% intervals
 import hashlib
@@ -933,7 +1056,7 @@ def bootstrap_results_table(results):
     return table[leading+[c for c in table if c not in leading]]
 bootstrap_table=bootstrap_results_table(corr_all_df)
 with pd.ExcelWriter(OUT_SUPPLEMENT_XLSX,engine='openpyxl',mode='a',if_sheet_exists='replace') as writer:
-    allowed={'Study_data','Table_S1','TSH_observations','TSH_descriptives','TSH_correlations','Data_dictionary','Directed_bootstrap'}
+    allowed={'Study_data','Table_S1','TSH_observations','TSH_descriptives','TSH_correlations','Data_dictionary','Directed_bootstrap','ANN_Nonlinear_RegressionModel'}
     for unwanted in set(writer.book.sheetnames)-allowed:del writer.book[unwanted]
     export_values(bootstrap_table).to_excel(writer,sheet_name='Directed_bootstrap',index=False)
     finish_excel(writer)
